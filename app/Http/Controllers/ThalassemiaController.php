@@ -58,7 +58,7 @@ class ThalassemiaController extends Controller
     private function runPrediction(array $input): array
     {
         $scriptPath = base_path('ml_model/predict.py');
-        $pythonExec = 'C:\\Users\\ASUS\\AppData\\Local\\Programs\\Python\\Launcher\\py.exe';
+        $pythonExec = env('PYTHON_EXECUTABLE', 'py');
         $process = new \Symfony\Component\Process\Process([$pythonExec, $scriptPath]);
         
         // The ML script expects 'hb', 'mcv', 'mch', 'mchc', 'rbc', 'rdw'
