@@ -57,21 +57,65 @@ def main():
         
         # Load model and scaler
         dir_path = os.path.dirname(os.path.realpath(__file__))
+        base_path = os.path.dirname(dir_path)
         model = joblib.load(os.path.join(dir_path, 'model.pkl'))
         scaler = joblib.load(os.path.join(dir_path, 'scaler.pkl'))
         
         row_sc = scaler.transform(row_vals)
+        row_sc_df = pd.DataFrame(row_sc, columns=ALL_FEATURES)
         
-        pred_class_idx = model.predict(row_sc)[0]
+        pred_class_idx = int(model.predict(row_sc)[0])
         pred_probs = model.predict_proba(row_sc)[0]
         
         predicted_class = LABEL_MAP[pred_class_idx]
         confidence = float(np.max(pred_probs)) * 100
         
-        # Determine top 3 contributing features simply by multiplying input values with feature importance if available
-        # or just fallback to some key features since full SHAP explanation is heavy and we didn't save the explainer.
-        # Let's provide a mock representation based on indices for prototype simplicity that looks real:
-        top_features = ["Low MCV" if mcv < 80 else "Normal MCV", "High RBC" if rbc > 5.5 else "Normal RBC count", "Low MCH" if mch < 27 else "Normal MCH"]
+        # Compute SHAP values for the predicted class
+        import shap
+        import matplotlib
+        matplotlib.use('Agg')
+        import matplotlib.pyplot as plt
+        
+        explainer = shap.TreeExplainer(model)
+        shap_values = explainer.shap_values(row_sc_df)
+        
+        # Extract expected values and target SHAP array
+        ev = explainer.expected_value
+        if isinstance(ev, np.ndarray) or hasattr(ev, '__len__'):
+            base = float(ev[pred_class_idx])
+        else:
+            base = float(ev)
+            
+        # Extract SHAP array per class
+        if isinstance(shap_values, np.ndarray) and shap_values.ndim == 3:
+            class_shap = shap_values[0, :, pred_class_idx]
+        elif isinstance(shap_values, list):
+            class_shap = shap_values[pred_class_idx][0]
+        else:
+            class_shap = shap_values[0]
+            
+        # Build raw SHAP dictionary for web response
+        shap_contrib = {ALL_FEATURES[i]: float(class_shap[i]) for i in range(len(ALL_FEATURES))}
+        
+        # Save local explanation waterfall plot deterministically
+        filename = f"waterfall_{rbc:.2f}_{hgb:.2f}_{mcv:.1f}_{mch:.1f}_{mchc:.1f}_{rdw:.1f}.png"
+        img_dir = os.path.join(base_path, 'public', 'images')
+        os.makedirs(img_dir, exist_ok=True)
+        img_path = os.path.join(img_dir, filename)
+        
+        if not os.path.exists(img_path):
+            plt.figure(figsize=(9, 5.5))
+            explanation = shap.Explanation(
+                values=class_shap,
+                base_values=base,
+                data=row.iloc[0].values,
+                feature_names=ALL_FEATURES
+            )
+            shap.plots.waterfall(explanation, max_display=10, show=False)
+            plt.title(f"Local Explanation: {predicted_class} Prediction", fontsize=13, pad=12)
+            plt.tight_layout()
+            plt.savefig(img_path, dpi=120, bbox_inches='tight')
+            plt.close()
         
         # Carrier probability is sum of trait probabilities (Alpha + Silent Carrier + Beta)
         carrier_prob = float(pred_probs[1] + pred_probs[2] + pred_probs[3])
@@ -103,6 +147,9 @@ def main():
             'flag_for_review': bool(uncertain),
             'mentzer_index': round(mentzer_idx, 3),
             'mentzer_interpretation': mentzer_interp,
+            'waterfall_image': f"/images/{filename}",
+            'shap_values': shap_contrib,
+            'base_value': round(base, 4)
         }
         
         print(json.dumps(result))
@@ -114,3 +161,4 @@ def main():
 
 if __name__ == '__main__':
     main()
+

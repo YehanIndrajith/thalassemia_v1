@@ -53,16 +53,11 @@ class ThalassemiaController extends Controller
     }
 
     /**
-     * Call the trained Python ML model via CLI.
+     * Call the trained Python ML model (via HTTP service if running, or falling back to CLI).
      */
     private function runPrediction(array $input): array
     {
-        $scriptPath = base_path('ml_model/predict.py');
-        $pythonExec = env('PYTHON_EXECUTABLE', 'py');
-        $process = new \Symfony\Component\Process\Process([$pythonExec, $scriptPath]);
-        
-        // The ML script expects 'hb', 'mcv', 'mch', 'mchc', 'rbc', 'rdw'
-        $payload = json_encode([
+        $payload = [
             'hb' => (float) $input['hemoglobin'],
             'mcv' => (float) $input['mcv'],
             'mch' => (float) $input['mch'],
@@ -71,21 +66,42 @@ class ThalassemiaController extends Controller
             'rdw' => (float) $input['rdw'],
             'gender' => $input['gender'] ?? '',
             'age' => $input['age'] ?? 0,
-        ]);
+        ];
         
-        $process->setInput($payload);
-        $process->run();
+        $mlResult = null;
+        $usedHttp = false;
 
-        if (!$process->isSuccessful()) {
-            // Fallback gracefully or bubble up error
-            throw new \Exception('ML Model failed: ' . $process->getErrorOutput());
+        // Try the high-performance Python daemon first
+        try {
+            $response = \Illuminate\Support\Facades\Http::timeout(2.0)
+                ->post('http://127.0.0.1:5000/predict', $payload);
+                
+            if ($response->successful()) {
+                $mlResult = $response->json();
+                $usedHttp = true;
+            }
+        } catch (\Exception $e) {
+            // Daemon is not running or timed out; fall back to CLI execution
         }
 
-        $output = $process->getOutput();
-        $mlResult = json_decode($output, true);
+        // CLI Fallback
+        if (!$mlResult) {
+            $scriptPath = base_path('ml_model/predict.py');
+            $pythonExec = env('PYTHON_EXECUTABLE', 'py');
+            $process = new \Symfony\Component\Process\Process([$pythonExec, $scriptPath]);
+            $process->setInput(json_encode($payload));
+            $process->run();
+
+            if (!$process->isSuccessful()) {
+                throw new \Exception('ML Model execution failed: ' . $process->getErrorOutput());
+            }
+
+            $output = $process->getOutput();
+            $mlResult = json_decode($output, true);
+        }
 
         if (json_last_error() !== JSON_ERROR_NONE || isset($mlResult['error'])) {
-            throw new \Exception('Invalid response from ML script: ' . ($mlResult['error'] ?? 'Unknown Error'));
+            throw new \Exception('Invalid response from ML prediction: ' . ($mlResult['error'] ?? 'Unknown Error'));
         }
 
         // Map ML output to Blade view variables
@@ -110,6 +126,10 @@ class ThalassemiaController extends Controller
             'flag_for_review' => (bool) ($mlResult['flag_for_review'] ?? false),
             'mentzer_index' => (float) ($mlResult['mentzer_index'] ?? 0),
             'mentzer_interpretation' => $mlResult['mentzer_interpretation'] ?? '',
+            'waterfall_image' => $mlResult['waterfall_image'] ?? null,
+            'shap_values' => $mlResult['shap_values'] ?? [],
+            'base_value' => $mlResult['base_value'] ?? 0,
+            'used_http' => $usedHttp,
         ];
     }
 }
